@@ -1,0 +1,100 @@
+@startuml rag-query-flow-real
+
+title RAG Query 
+
+actor "Foydalanuvchi" as User
+participant "Frontend" as Frontend
+participant "FastAPI\nQuery Router" as QueryRouter
+participant "QueryService" as QueryService
+participant "EmbeddingService" as EmbeddingService
+participant "GeminiEmbedding" as GeminiEmbed
+participant "QdrantClient" as Qdrant
+participant "GeminiLLM" as LLM
+participant "ChatRepository" as ChatRepo
+participant "PostgreSQL" as DB
+
+User -> Frontend: 1. Savol yozadi va yuboradi
+Frontend -> QueryRouter: 2. POST /api/v1/query\n{\n  "question": "Hujjatda nima haqida yozilgan?"\n}
+
+QueryRouter -> QueryRouter: 3. Request validatsiya (QueryRequest)\n- question: min_length=1, max_length=1000
+
+alt question bo'sh yoki noto'g'ri
+    QueryRouter -> Frontend: 4. HTTP 400 Bad Request\n{"detail": "Savol bo'sh bo'lmasligi kerak"}
+    Frontend -> User: 5. Error ko'rsatish
+end
+
+QueryRouter -> QueryService: 6. process_query(question, db)
+
+== Savol Embedding ==
+QueryService -> EmbeddingService: 7. embed_text(question)
+EmbeddingService -> GeminiEmbed: 8. embed_text(question)
+
+GeminiEmbed -> GeminiEmbed: 9. genai.embed_content(\n  model="models/embedding-001",\n  content=text,\n  task_type="retrieval_document"\n)
+
+alt API muvaffaqiyatli
+    GeminiEmbed -> EmbeddingService: 10. embedding [768 dimensions]\nLOG: "Successfully generated embedding"
+    EmbeddingService -> QueryService: 11. question_embedding
+else API xato
+    GeminiEmbed -> EmbeddingService: 12. Exception
+    EmbeddingService -> QueryService: 13. raise Exception
+    QueryService -> QueryRouter: 14. HTTP 500
+    QueryRouter -> Frontend: 15. Error response
+    Frontend -> User: 16. "Xatolik yuz berdi"
+end
+
+== Vector Search ==
+QueryService -> Qdrant: 17. search(\n  query_embedding,\n  top_k=3\n)
+
+Qdrant -> Qdrant: 18. client.search(\n  collection_name="documents",\n  query_vector=query_embedding,\n  limit=3\n)
+
+Qdrant -> QueryService: 19. search_results = [\n  {content: "...", score: 0.89,\n   document_id: "...", chunk_index: 0},\n  {content: "...", score: 0.85,\n   document_id: "...", chunk_index: 1},\n  {content: "...", score: 0.82,\n   document_id: "...", chunk_index: 2}\n]\nLOG: "Found 3 similar documents"
+
+alt natija topilmadi
+    QueryService -> QueryRouter: 20. return (\n  "Kechirasiz, bu savolga javob topilmadi.\n  Iltimos, boshqa savol bering.",\n  []\n)
+    QueryRouter -> Frontend: 21. Response with default message
+    Frontend -> User: 22. Default javob ko'rsatish
+end
+
+== Context Preparation ==
+QueryService -> QueryService: 23. context = "\\n\\n".join([\n  result['content']\n  for result in search_results\n])
+
+QueryService -> QueryService: 24. sources = [\n  SourceDocument(\n    content=result['content'],\n    score=result['score']\n  )\n  for result in search_results\n]
+
+== LLM Answer Generation ==
+QueryService -> LLM: 25. generate_answer(question, context)
+
+LLM -> LLM: 26. _create_prompt(question, context)\nprompt = f"""Siz yordam beruvchi AI assistantsiz.\nBerilgan kontekst asosida foydalanuvchi\nsavoliga aniq va to'liq javob bering.\n\nKontekst:\n{context}\n\nSavol: {question}\n\nJavob:"""
+
+LLM -> LLM: 27. self.model.generate_content(\n  prompt,\n  generation_config={\n    "temperature": 0.7,\n    "max_output_tokens": 1000\n  }\n)
+
+alt generation muvaffaqiyatli
+    LLM -> QueryService: 28. answer = response.text.strip()\nLOG: "Successfully generated answer of length N"
+else generation xato
+    LLM -> QueryService: 29. Exception
+    QueryService -> QueryRouter: 30. HTTP 500
+    QueryRouter -> Frontend: 31. Error response
+    Frontend -> User: 32. "Javob yaratishda xatolik"
+end
+
+== Database Saqlash ==
+QueryService -> ChatRepo: 33. create_chat(\n  db=db,\n  question=question,\n  answer=answer,\n  sources=[s.dict() for s in sources]\n)
+
+ChatRepo -> DB: 34. chat = Chat(\n  id=uuid.uuid4(),\n  question=question,\n  answer=answer,\n  sources=sources  # JSONB\n)
+
+DB -> DB: 35. db.add(chat)\ndb.commit()\ndb.refresh(chat)
+
+DB -> ChatRepo: 36. chat object with id
+ChatRepo -> QueryService: 37. Chat object\nLOG: "Created chat record with id: {chat.id}"
+
+QueryService -> QueryService: 38. LOG: "Successfully processed query\nand saved to database"
+
+== Response ==
+QueryService -> QueryRouter: 39. return (answer, sources)
+
+QueryRouter -> QueryRouter: 40. QueryResponse(\n  success=True,\n  question=question,\n  answer=answer,\n  sources=sources\n)
+
+QueryRouter -> Frontend: 41. HTTP 200 OK\n{\n  "success": true,\n  "question": "Hujjatda...",\n  "answer": "Hujjatda...",\n  "sources": [\n    {"content": "...", "score": 0.89},\n    {"content": "...", "score": 0.85},\n    {"content": "...", "score": 0.82}\n  ]\n}
+
+Frontend -> User: 42. Javob va manbalar ko'rsatiladi
+
+@enduml
