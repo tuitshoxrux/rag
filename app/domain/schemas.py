@@ -30,6 +30,8 @@ class SourceDocument(BaseModel):
     """Source document schema"""
     content: str = Field(..., description="Document content")
     score: float = Field(..., description="Relevance score")
+    document_id: Optional[str] = None
+    chunk_index: Optional[int] = None
 
 
 class QueryRequest(BaseModel):
@@ -46,8 +48,28 @@ class QueryResponse(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    """Upload response schema"""
+    """Single upload response schema"""
     success: bool
     message: str
     document_id: str
     chunks_count: int
+
+
+class FileUploadResult(BaseModel):
+    """Individual file upload result"""
+    filename: str
+    success: bool
+    error: Optional[str] = None
+    document_id: Optional[str] = None
+    chunks_count: int = 0
+
+
+class BatchUploadResponse(BaseModel):
+    """Batch upload response schema"""
+    success: bool
+    message: str
+    total_files: int
+    successful_uploads: int
+    failed_uploads: int
+    total_chunks: int
+    results: List[FileUploadResult]
